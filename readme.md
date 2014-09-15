@@ -1,7 +1,8 @@
 owned_ptr
 =========
 owned_ptr is a small class created in C++11 designed as a smart pointer for
-external libraries (e.g. plugins). It was created to solve the similar issue of:
+dynamic external libraries (e.g. plugins). It was created to solve the similar
+issue of:
 
     #include <iostream>
     
@@ -30,8 +31,8 @@ telling when a variable is invalidated and becomes a dangling pointer. If you
 wish to allow users to disable/remove external libraries at runtime, then the
 issue above is apparent. owned_ptr solves this issue.
 
-The owned_ptr class relies on another class child_ptr which stores a reference
-to the owned_ptr class and vice-versa. child_ptr is completely thread safe and
+The owned_ptr class relies on another class reader_ptr which stores a reference
+to the owned_ptr class and vice-versa. reader_ptr is completely thread safe and
 free from any memory errors.
 
 Usage

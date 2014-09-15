@@ -1,7 +1,8 @@
 /**
  * The MIT License (MIT)
  *
- * Copyright (c) 2014 Daniel Hrabovcak
+ * Copyright (c) 2014 Daniel Hrabovcak, Josh Ventura
+ *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
  * in the Software without restriction, including without limitation the rights
@@ -23,9 +24,11 @@
 #ifndef OWNED_PTR__HPP_
 #define OWNED_PTR__HPP_
 #include <ctime>
-#include <cassert>
-#include <vector>
 #include <mutex>
+#include <thread>
+#include <cassert>
+#include <deque>
+#include <list>
 
 // A macro to disallow the copy constructor and operator= functions
 // This should be used in the private: declarations for a class
@@ -34,14 +37,14 @@
 	void operator=(const TypeName&)
 
 
-template <typename Type> class child_ptr;
+template <typename Type> class reader_ptr;
 
 /**
- * @brief  A smart pointer that owns children.
+ * @brief  A smart pointer whose data is read from a reader_ptr.
  *
- * This class was made specifically for applications that use run-time removable
- * external libraries, where data might need to be deleted when the library's
- * heap segment is removed (the library is unloaded) and used memory is not
+ * This class was made specifically for applications that use dynamic external
+ * libraries, where data is deleted as library's heap segment is suddenly
+ * removed (the library is unloaded during run-time) and used memory is not
  * tracked or cannot be determined.
  *
  * This class is thread safe.
@@ -58,118 +61,110 @@ public:
 	/**
 	 * @brief  Creates an instance with the given value.
 	 *
-	 * The given variable is owned by the owned_ptr instance. It is be managed
-	 * and deleted by this instance.
+	 * The given variable is owned by the owned_ptr instance. It is managed and
+	 * deleted by this instance.
 	 */
 	explicit owned_ptr(Type *value);
 
 	/**
-	 * @brief  Deallocates associated data and invalidates all children.
+	 * @brief  Deallocates associated data and invalidates all readers.
 	 *
-	 * If a child is currently accessing the values, then this function will
-	 * wait for the child to unlock its mutex before deleting.
+	 * If a reader is currently accessing the values, then this function will
+	 * wait for the reader to be unlocked before deleting.
 	 */
 	~owned_ptr();
 
 	/**
-	 * @brief  Pairs the child instance with this instance.
+	 * @brief  Pairs the reader instance with this instance.
 	 *
-	 * A child can only reference another parent if it is not locked. If a child
-	 * is not locked, then it will reference this instance and is added into a
-	 * list, with the insert O(n).
+	 * If the given reader is already locked, then the reader will not be able
+	 * to obtain its new value until it makes another call to lock().
 	 */
-	void get(child_ptr<Type> &child);
+	void get(reader_ptr<Type> &reader);
 
 	/**
 	 * @brief  Changes the value type.
 	 *
-	 * The previous value is deleted. The new value variable is owned by this
-	 * instance. It is be managed and deleted by this instance.
+	 * This function is blocked until not readers are using the value. The given
+	 * variable is owned by this instance. It is managed and deleted by this
+	 * instance.
 	 */
-	void set(Type *value);
+	void reset(Type *value);
+
+	/**
+	 * @brief  Returns the number of readers.
+	 */
+	size_t count();
 
 protected:
-	friend class child_ptr<Type>;
-	void remove_(child_ptr<Type> *child);
+	friend class reader_ptr<Type>;
+	void remove_(reader_ptr<Type> *child);
+	void replace_(reader_ptr<Type> *reader, reader_ptr<Type> *with);
 	std::mutex mutex_;
 	Type *value_;
 private:
 	DISALLOW_COPY_AND_ASSIGN(owned_ptr<Type>);
-	std::vector<child_ptr<Type>*> children_;
+	std::deque<reader_ptr<Type>*> children_;
+	std::list<reader_ptr<Type>*> update_;
 };
 
 /**
- * @brief  A child pointer that references an owned pointer.
- *
- * This class is thread safe.
+ * @brief  A class that reads data from a referenced owned pointer.
  */
-template <typename Type> class child_ptr
+template <typename Type> class reader_ptr
 {
 public:
 
 	/**
 	 * @brief  Creates an instance without a referenced owner.
 	 */
-	child_ptr();
+	reader_ptr();
 
 	/**
 	 * @brief  Creates an instance with a referenced owner.
 	 */
-	child_ptr(owned_ptr<Type> *owner);
+	explicit reader_ptr(owned_ptr<Type> *owner);
+
+	/**
+	 * @brief  Creates an instance with the same owner as the given reader.
+	 */
+	reader_ptr(reader_ptr<Type> &other);
+
+	/**
+	 * @brief  Creates an instance by replacing the given reader.
+	 */
+	reader_ptr(reader_ptr<Type> &&other);
 
 	/**
 	 * @brief  Removes itself from its referenced owner.
 	 */
-	~child_ptr();
+	~reader_ptr();
 
 	/**
-	 * @brief  Locks the owner instance.
-	 * @return The owner instance's value if the owner still exists, or nullptr
-	 *         if the owner does not exist.
+	 * @brief  Locks the owner's value.
+	 * @return The owner's value if the owner still exists, or nullptr if there
+	 *         is no owner, or the owner has been deleted.
 	 * @see    unlock();
 	 *
-	 * While a child is locked, the owner instance is locked as well, preventing
-	 * other children from accessing the data.
+	 * Multiple readers may lock simultaneously. If an owner's value has
+	 * changed after calling this method, then this method must be called again
+	 * to recieve the new value.
 	 */
 	Type *lock();
 
 	/**
-	 * @brief  Locks the owner instance with the indicated timeout duration.
-	 * @return The owner instance's value if the owner still exists, or nullptr
-	 *         if the owner does not exist or the locking timed out.
-	 * @see    unlock();
-	 *
-	 * While a child is locked, the owner instance is locked as well, preventing
-	 * other children from accessing the data.
-	 */
-	Type *try_lock(time_t timeout);
-
-	/**
-	 * @brief  Unlocks the owner instance.
-	 *
-	 * If attempting an already unlocked instance, then the behavior is
-	 * undefined.
+	 * @brief  Unlocks the owner's value.
 	 */
 	void unlock();
 
-private:
-
-	inline Type *lock_()
-	{
-		if (parent_ != nullptr)
-		{
-			locked_ = true;
-			return parent_->value_;
-		}
-		mutex_.unlock();
-		return nullptr;
-	}
-
-	DISALLOW_COPY_AND_ASSIGN(child_ptr<Type>);
+protected:
 	friend class owned_ptr<Type>;
+	void set_owner_(owned_ptr<Type> *owner);
+	Type *value_;
+	Type *locked_;
+private:
 	std::mutex mutex_;
 	owned_ptr<Type> *parent_;
-	bool locked_;
 };
 
 template <typename Type> owned_ptr<Type>::owned_ptr() : value_(nullptr) {}
@@ -179,41 +174,63 @@ template <typename Type> owned_ptr<Type>::owned_ptr(Type *value) :
 
 template <typename Type> owned_ptr<Type>::~owned_ptr()
 {
-	std::lock_guard<std::mutex> guard(mutex_);
-	(void)guard; // Remove 'unused' warnings.
-	for (auto &i : children_)
+	mutex_.lock();
+	for (auto &child : children_)
 	{
-		i->mutex_.lock();
-		i->parent_ = nullptr;
-		i->mutex_.unlock();
+		child->value_ = nullptr;
+		child->set_owner_(nullptr);
+		while (child->locked_ != nullptr)
+		{
+			std::this_thread::yield();
+		}
 	}
 	delete value_;
+	mutex_.unlock();
 }
 
-template <typename Type> void owned_ptr<Type>::get(child_ptr<Type> &child)
+template <typename Type> void owned_ptr<Type>::get(reader_ptr<Type> &reader)
 {
-	child.mutex_.lock();
-	if (child.parent_ != nullptr)
+	mutex_.lock();
+	reader.value_ = value_;
+	reader.set_owner_(this);
+	children_.push_back(&reader);
+	mutex_.unlock();
+}
+
+template <typename Type> void owned_ptr<Type>::reset(Type *value)
+{
+	mutex_.lock();
+	for (auto &child : children_)
 	{
-		child.parent_->remove_(&child);
+		child->value_ = value;
+		if (child->locked_ != nullptr)
+		{
+			update_.push_back(child);
+		}
 	}
-	child.parent_ = this;
-	child.mutex_.unlock();
-
-	std::lock_guard<std::mutex> guard(mutex_);
-	(void)guard; // Remove 'unused' warnings.
-	children_.push_back(&child);
-}
-
-template <typename Type> void owned_ptr<Type>::set(Type *value)
-{
-	std::lock_guard<std::mutex> guard(mutex_);
-	(void)guard; // Remove 'unused' warnings.
+	while (!update_.empty())
+	{
+		for (auto child = update_.begin(); child != update_.end(); ++child)
+		{
+			if ((*child)->locked_ == nullptr || (*child)->locked_ == value)
+			{
+				update_.erase(child);
+			}
+		}
+	}
 	delete value_;
 	value_ = value;
+	mutex_.unlock();
 }
 
-template <typename Type> void owned_ptr<Type>::remove_(child_ptr<Type> *child)
+template <typename Type> size_t owned_ptr<Type>::count()
+{
+	std::lock_guard<std::mutex> guard(mutex_);
+	(void)guard; // Remove 'unused' warnings.
+	return children_.size();
+}
+
+template <typename Type> void owned_ptr<Type>::remove_(reader_ptr<Type> *child)
 {
 	std::lock_guard<std::mutex> guard(mutex_);
 	(void)guard; // Remove 'unused' warnings.
@@ -223,62 +240,95 @@ template <typename Type> void owned_ptr<Type>::remove_(child_ptr<Type> *child)
 	{
 		if (*i == child)
 		{
+			while ((*i)->locked_ == nullptr)
+			{
+				std::this_thread::yield();
+			}
 			children_.erase(i);
 			return;
 		}
 	}
 	assert(true);
-
 }
 
-template <typename Type> child_ptr<Type>::child_ptr() : parent_(nullptr) {}
+template <typename Type> void owned_ptr<Type>::replace_(
+	reader_ptr<Type> *reader, reader_ptr<Type> *with)
+{
+	std::lock_guard<std::mutex> guard(mutex_);
+	(void)guard; // Remove 'unused' warnings.
 
-template <typename Type> child_ptr<Type>::child_ptr(owned_ptr<Type> *owner)
+	auto i = children_.begin();
+	while (i != children_.end())
+	{
+		if (*i == reader)
+		{
+			*i = with;
+			return;
+		}
+	}
+	assert(true);
+}
+
+template <typename Type> reader_ptr<Type>::reader_ptr() : value_(nullptr),
+	locked_(nullptr), parent_(nullptr) {}
+
+template <typename Type> reader_ptr<Type>::reader_ptr(owned_ptr<Type> *owner) :
+	reader_ptr<Type>()
 {
 	owner->get(*this);
 }
 
-template <typename Type> child_ptr<Type>::~child_ptr()
+template <typename Type> reader_ptr<Type>::reader_ptr(reader_ptr<Type> &other) :
+	reader_ptr<Type>()
 {
-	// Causes a wait for child_ptr<Type>::unlock() and prevents more calls.
-	std::lock_guard<std::mutex> guard(mutex_);
-	(void)guard; // Remove 'unused' warnings.
+	other.mutex_.lock();
+	if (other.parent_ != nullptr)
+	{
+		other.parent_->get(*this);
+	}
+	other.mutex_.unlock();
+}
 
+template <typename Type> reader_ptr<Type>::reader_ptr(reader_ptr<Type> &&other)
+	: reader_ptr<Type>()
+{
+	other.mutex_.lock();
+	if (other.parent_ != nullptr)
+	{
+		other.parent_->replace_(other, this);
+	}
+	other.mutex_.unlock();
+}
+
+template <typename Type> reader_ptr<Type>::~reader_ptr()
+{
+	mutex_.lock();
 	if (parent_ != nullptr)
 	{
 		parent_->remove_(this);
 	}
+	mutex_.unlock();
 }
 
-template <typename Type> Type *child_ptr<Type>::lock()
+template <typename Type> Type *reader_ptr<Type>::lock()
+{
+	return locked_ = value_;
+}
+
+template <typename Type> void reader_ptr<Type>::unlock()
+{
+	locked_ = nullptr;
+}
+
+template <typename Type> void reader_ptr<Type>::set_owner_(owned_ptr<Type> *owner)
 {
 	mutex_.lock();
-	return lock_();
-}
-
-template <typename Type> Type *child_ptr<Type>::try_lock(time_t timeout)
-{
-	time_t now;
-	time(&now);
-	do
+	if (owner != nullptr && parent_ != nullptr)
 	{
-		if (mutex_.try_lock())
-		{
-			return lock_();
-		}
+		parent_->remove_(this);
 	}
-	while (now + timeout < time(nullptr));
-	return nullptr;
-}
-
-template <typename Type> void child_ptr<Type>::unlock()
-{
-	if (locked_)
-	{
-		mutex_.unlock();
-		parent_->mutex_.unlock();
-		locked_ = false;
-	}
+	parent_ = owner;
+	mutex_.unlock();
 }
 
 #endif // OWNED_PTR__HPP_
